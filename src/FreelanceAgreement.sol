@@ -13,14 +13,35 @@ pragma solidity ^0.8.19;
 contract FreelanceAgreement {
     /* Errors */
 
-    /// @notice Thrown when the amount staked by the client does not match the required project price.
+    /**
+     * @notice Thrown when the amount staked by the client does not match the required project price.
+     * @dev Ensures that the client stakes the exact project price or within a tolerance range.
+     */
     error FreelanceAgreement__IncorrectStakingAmount();
 
-    /// @notice Thrown when the client attempts to stake money after already staking.
+    /**
+     * @notice Thrown when the client attempts to stake money after already staking.
+     * @dev Prevents multiple staking by the client to avoid errors in contract state management.
+     */
     error FreelanceAgreement__AlreadyStakedMoney();
 
-    /// @notice Thrown when the project state does not match the expected state for a particular function or operation.
+    /**
+     * @notice Thrown when the project state does not match the expected state for a particular function or operation.
+     * @dev Ensures that functions are only executed in the correct project state.
+     */
     error FreelanceAgreement__IncorrectProjectState();
+
+    /**
+     * @notice Thrown when the client attempts to revoke staked money before cancelling the agreement.
+     * @dev Ensures that the client can only revoke money after the agreement has been cancelled.
+     */
+    error FreelanceAgreement__AgreementNotCancelled();
+
+    /**
+     * @notice Thrown when the transfer of funds fails.
+     * @dev Used to handle failures in fund transfer operations, ensuring robustness.
+     */
+    error FreelanceAgreement__TransferFailed();
 
     /* Type declarations */
 
@@ -63,6 +84,7 @@ contract FreelanceAgreement {
 
     Project_Status public projectStatus; ///< Current status of the project, duplicated for easy access.
 
+    uint256 private constant TOLERANCE = 0.01 ether; ///< Allow a tolerance of 0.01 ether for gas fees
     /* Events */
 
     /**
@@ -122,7 +144,7 @@ contract FreelanceAgreement {
      * @param _status The required project status for the function to execute.
      */
     modifier CurrentProjectState(Project_Status _status) {
-        if (projectStatus == _status) {
+        if (projectStatus != _status) {
             revert FreelanceAgreement__IncorrectProjectState();
         }
         _;
@@ -157,11 +179,11 @@ contract FreelanceAgreement {
         contractDetails = ContractDetails({
             ClientAddress: _Client,
             FreelancerAddress: _Freelancer,
-            ProjectPrice: _ProjectPrice,
+            ProjectPrice: _ProjectPrice * 1 ether,
             NumberOfMilestones: _NumberOfMilestones,
             ProjectTitle: _ProjectTitle,
             ProjectDescription: _ProjectDescription,
-            MilestonePayment: (_ProjectPrice / _NumberOfMilestones),
+            MilestonePayment: ((_ProjectPrice * 1 ether) / _NumberOfMilestones),
             projectStatus: Project_Status.Initiated,
             ContractAddress: address(this),
             CurrentMilestone: 0,
@@ -187,12 +209,20 @@ contract FreelanceAgreement {
         OnlyClient
         CurrentProjectState(Project_Status.Initiated)
     {
-        if (msg.value != contractDetails.ProjectPrice) {
+        uint256 amount = msg.value;
+        uint256 projectPrice = contractDetails.ProjectPrice;
+        // Check if the amount staked is within the acceptable range of the project price.
+        if (
+            amount < projectPrice - TOLERANCE ||
+            amount > projectPrice + TOLERANCE
+        ) {
             revert FreelanceAgreement__IncorrectStakingAmount();
         }
+        // Ensure that the client has not already staked the money.
         if (contractDetails.ClientStake) {
             revert FreelanceAgreement__AlreadyStakedMoney();
         }
+        // Mark the client as having staked the money and activate the project.
         contractDetails.ClientStake = true;
         projectStatus = Project_Status.Active;
         emit ContractStateChanged(
@@ -203,11 +233,51 @@ contract FreelanceAgreement {
     }
 
     /**
-     * @notice Allows the client or freelancer to cancel the contract.
-     * @dev This function should include logic to handle the cancellation of the contract and return funds if applicable.
+     * @notice Allows the client to revoke staked money after agreement cancellation.
+     * @dev Ensures that the client can only revoke funds if the agreement has been cancelled. It handles fund transfer and reverts on failure.
+     * @custom:calledby Client
+     * @custom:modifiers OnlyClient, CurrentProjectState(Project_Status.Cancelled)
+     * @custom:error FreelanceAgreement__AgreementNotCancelled Thrown if the agreement is not cancelled.
+     * @custom:error FreelanceAgreement__TransferFailed Thrown if the fund transfer fails.
      */
-    function Cancel() public {
-        // Function logic to be implemented.
+    function RevokeStakedMoney()
+        public
+        payable
+        OnlyClient
+        CurrentProjectState(Project_Status.Cancelled)
+    {
+        if (ClientCancelAgreement == false) {
+            revert FreelanceAgreement__AgreementNotCancelled();
+        }
+        // Attempt to transfer the staked money back to the client.
+        (bool success, ) = contractDetails.ClientAddress.call{
+            value: contractDetails.ProjectPrice
+        }("");
+        if (!success) {
+            revert FreelanceAgreement__TransferFailed();
+        }
+    }
+
+    /**
+     * @notice Allows the client or freelancer to cancel the contract.
+     * @dev This function updates the project status to Cancelled and emits an event. Both parties can cancel the contract.
+     * @custom:calledby Client, Freelancer
+     * @custom:modifiers Both_ClientAndFreelancer
+     */
+    function Cancel() public Both_ClientAndFreelancer {
+        if (msg.sender == contractDetails.ClientAddress) {
+            ClientCancelAgreement = true;
+        }
+        if (msg.sender == contractDetails.FreelancerAddress) {
+            FreelancerCancelAgreement = true;
+        }
+        // Update the project status to Cancelled and emit an event.
+        projectStatus = Project_Status.Cancelled;
+        emit ContractStateChanged(
+            contractDetails.ClientAddress,
+            contractDetails.FreelancerAddress,
+            projectStatus
+        );
     }
 
     /**
