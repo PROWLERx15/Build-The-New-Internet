@@ -191,11 +191,11 @@ contract FreelanceAgreement {
         contractDetails = ContractDetails({
             ClientAddress: _Client,
             FreelancerAddress: _Freelancer,
-            ProjectPrice: _ProjectPrice * 1 ether,
+            ProjectPrice: _ProjectPrice,
             NumberOfMilestones: _NumberOfMilestones,
             ProjectTitle: _ProjectTitle,
             ProjectDescription: _ProjectDescription,
-            MilestonePayment: ((_ProjectPrice * 1 ether) / _NumberOfMilestones),
+            MilestonePayment: ((_ProjectPrice) / _NumberOfMilestones),
             projectStatus: Project_Status.Initiated,
             ContractAddress: address(this),
             CurrentMilestone: 0,
