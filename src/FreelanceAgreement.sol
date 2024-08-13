@@ -3,7 +3,7 @@ pragma solidity ^0.8.19;
 
 /**
  * @title Freelance Platform Agreement Contract
- * @author Kshitij Dhamanikar
+ * @author Kshitij
  * @notice This contract creates an escrow between a Client and a Freelancer to manage payments for a project.
  * @dev This contract handles project state management, staking of funds by the client, and events for state changes.
  */
@@ -42,6 +42,18 @@ contract FreelanceAgreement {
      * @dev Used to handle failures in fund transfer operations, ensuring robustness.
      */
     error FreelanceAgreement__TransferFailed();
+
+    /**
+     * @notice Thrown when an attempt is made to cancel a contract that is already cancelled.
+     * @dev This error is used to signal that the contract's project status is already set to Cancelled.
+     */
+    error FreelanceAgreement__AgreementAlreadyCancelled();
+
+    /**
+     * @notice Thrown when an attempt is made to cancel a contract that has already been completed.
+     * @dev This error indicates that the project status is set to Completed, and thus cancelling the agreement is not permitted since the project has already been completed.
+     */
+    error FreelanceAgreement__ProjectIsCompleted();
 
     /* Type declarations */
 
@@ -250,25 +262,36 @@ contract FreelanceAgreement {
             revert FreelanceAgreement__AgreementNotCancelled();
         }
         // Attempt to transfer the staked money back to the client.
-        (bool success, ) = contractDetails.ClientAddress.call{
+        (bool revokestake, ) = contractDetails.ClientAddress.call{
             value: contractDetails.ProjectPrice
         }("");
-        if (!success) {
+        if (!revokestake) {
             revert FreelanceAgreement__TransferFailed();
         }
     }
 
     /**
      * @notice Allows the client or freelancer to cancel the contract.
-     * @dev This function updates the project status to Cancelled and emits an event. Both parties can cancel the contract.
+     * @dev This function enables either the client or freelancer to cancel the contract, updating the project status to Cancelled.
+     *      - If the contract is already cancelled, it reverts with `FreelanceAgreement__AgreementAlreadyCancelled()`.
+     *      - If the contract is completed, it reverts with `FreelanceAgreement__ProjectIsCompleted()`.
+     *      - The function sets `ClientCancelAgreement` or `FreelancerCancelAgreement` based on the caller.
+     *      - After updating the project status to Cancelled, it emits the `ContractStateChanged` event with the new status.
      * @custom:calledby Client, Freelancer
      * @custom:modifiers Both_ClientAndFreelancer
+     * @custom:error FreelanceAgreement__AgreementAlreadyCancelled Thrown if the project status is already Cancelled.
+     * @custom:error FreelanceAgreement__ProjectIsCompleted Thrown if the project status is Completed.
      */
     function Cancel() public Both_ClientAndFreelancer {
+        if (projectStatus == Project_Status.Cancelled) {
+            revert FreelanceAgreement__AgreementAlreadyCancelled();
+        }
+        if (projectStatus == Project_Status.Completed) {
+            revert FreelanceAgreement__ProjectIsCompleted();
+        }
         if (msg.sender == contractDetails.ClientAddress) {
             ClientCancelAgreement = true;
-        }
-        if (msg.sender == contractDetails.FreelancerAddress) {
+        } else if (msg.sender == contractDetails.FreelancerAddress) {
             FreelancerCancelAgreement = true;
         }
         // Update the project status to Cancelled and emit an event.
@@ -281,18 +304,83 @@ contract FreelanceAgreement {
     }
 
     /**
-     * @notice Allows the freelancer to withdraw funds after completing milestones or the entire project.
-     * @dev This function should include logic to allow withdrawal of funds based on the completion of milestones or project completion.
-     * @custom:calledby Freelancer
-     * @custom:modifiers OnlyFreelancer
+     * @notice Allows the client to pay the freelancer for the current milestone.
+     * @dev This function handles the payment for each milestone, ensures that the contract has enough balance, and updates the project's status upon completion.
+     * @custom:calledby Client
+     * @custom:modifiers OnlyClient, CurrentProjectState(Project_Status.Active)
+     * @custom:requirements Ensures milestones are not already fully completed and the contract has sufficient balance.
+     * @custom:effects Transfers the milestone payment to the freelancer, updates the current milestone, and checks for project completion.
+     * @custom:errors FreelanceAgreement__TransferFailed If the payment transfer to the freelancer fails.
      */
-    function WithdrawMoney() public OnlyFreelancer {
-        // Function logic to be implemented.
+    function PayViaMilestones()
+        public
+        OnlyClient
+        CurrentProjectState(Project_Status.Active)
+    {
+        require(
+            contractDetails.NumberOfMilestonesCompleted <
+                contractDetails.NumberOfMilestones,
+            "All milestones have been Completed"
+        );
+        require(
+            address(this).balance >= contractDetails.MilestonePayment,
+            "Contract does not have enough balance to pay the milestone"
+        );
+        // Attempt to transfer the milestone payment to the freelancer
+        (bool payFreelancer, ) = (contractDetails.FreelancerAddress).call{
+            value: contractDetails.MilestonePayment
+        }("");
+        if (!payFreelancer) {
+            revert FreelanceAgreement__TransferFailed();
+        }
+        // Update state to reflect the milestone payment
+        contractDetails.CurrentMilestone++;
+        contractDetails.NumberOfMilestonesCompleted++;
+        if (
+            contractDetails.CurrentMilestone ==
+            contractDetails.NumberOfMilestones
+        ) {
+            // Update the project status to Completed and emit an event.
+            projectStatus = Project_Status.Completed;
+            emit ContractStateChanged(
+                contractDetails.ClientAddress,
+                contractDetails.FreelancerAddress,
+                projectStatus
+            );
+        }
     }
 
-    function payByMilestones() public {}
-
-    function payAtOnce() public {}
+    /**
+     * @notice Allows the client to pay the entire project price to the freelancer in one transaction.
+     * @dev This function updates the project status to Completed and ensures that the contract has enough balance to make the payment.
+     * @custom:calledby Client
+     * @custom:modifiers OnlyClient, CurrentProjectState(Project_Status.Active)
+     * @custom:error FreelanceAgreement__TransferFailed Thrown if the payment transfer to the freelancer fails.
+     */
+    function PayAtOnce()
+        public
+        OnlyClient
+        CurrentProjectState(Project_Status.Active)
+    {
+        require(
+            (address(this).balance) >= contractDetails.ProjectPrice,
+            "Contract does not have enough balance to pay the Freelancer"
+        );
+        (bool payFreelancer, ) = (contractDetails.FreelancerAddress).call{
+            value: contractDetails.ProjectPrice
+        }("");
+        if (!payFreelancer) {
+            revert FreelanceAgreement__TransferFailed();
+        }
+        // Update the project status to Completed and emit an event.
+        projectStatus = Project_Status.Completed;
+        contractDetails.ClientStake = false;
+        emit ContractStateChanged(
+            contractDetails.ClientAddress,
+            contractDetails.FreelancerAddress,
+            projectStatus
+        );
+    }
 
     /**
      * @notice Returns the current status of the project.
